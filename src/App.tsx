@@ -4,6 +4,7 @@ import { LeftTemplateConfig } from './components/LeftTemplateConfig';
 import { CenterCanvasPlayer } from './components/CenterCanvasPlayer';
 import { RightAgentWorkbench } from './components/RightAgentWorkbench';
 import { LocalBundleModal } from './components/LocalBundleModal';
+import { EditingAgent } from './components/EditingAgent';
 import {
   DEFAULT_MAIN_FRAME_CONFIG,
   DEFAULT_TEMPLATE_LAYERS,
@@ -204,17 +205,25 @@ export default function App() {
     }
   };
 
-  const handleUploadLocalVideo = (file: File) => {
-    const objectUrl = URL.createObjectURL(file);
+  const handleUploadLocalVideo = async (file: File) => {
+    setPipelineSummary('正在上传并读取本机视频…');
+    try {
+    const response = await fetch('/api/media/upload', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '上传失败');
+    const objectUrl = data.videoUrl;
     const newId = `local-${Date.now()}`;
-    const customBeats = currentMaterial.beats.map((b, i) => ({
-      ...b,
-      id: `${newId}-beat-${i + 1}`,
-    }));
+    const duration = Number(data.duration);
+    const customBeats: StoryBeat[] = [{ ...STANDARD_CATERPILLAR_BEATS[0], id: `${newId}-beat-1`, index: 1,
+      clipStartSec: 0, clipEndSec: duration, subtitleStartSec: 0, subtitleEndSec: Math.min(3, duration),
+      frameObservation: '已上传本机视频，画面内容尚未分析。', yellowSubtitle: '', ttsNarrationText: '',
+      thumbnailTimeSec: 0, frameThumbnailUrl: undefined }];
     const newItem: MaterialSourceItem = {
       ...currentMaterial,
       id: newId,
       title: `本机视频 · ${file.name}`,
+      description: '用户上传的视频，使用抽帧工具观察实际画面后再撰写解说。',
+      rawDurationLabel: `${duration.toFixed(1)}秒`,
       shortLabel: file.name,
       originType: 'user-specified',
       videoUrl: objectUrl,
@@ -225,6 +234,8 @@ export default function App() {
     setSelectedMaterialId(newId);
     setBeats(customBeats);
     setSelectedBeatId(customBeats[0].id);
+    setPipelineSummary(`已上传 ${file.name}（${duration.toFixed(1)}秒），现在可以使用 Agnes 剪辑 Agent。`);
+    } catch (error) { setPipelineSummary(error instanceof Error ? error.message : '视频上传失败'); }
   };
 
   const handleUpdateLayer = (id: string, patch: Partial<TemplateLayer>) => {
@@ -347,7 +358,7 @@ export default function App() {
         }),
       });
       const data = await res.json();
-
+      if (!res.ok) throw new Error(data.error || '画面分析失败');
       const existing = beats.find(
         (b) => timestampSec >= b.clipStartSec && timestampSec <= b.clipEndSec
       );
@@ -370,6 +381,8 @@ export default function App() {
           data.frameObservation || 'Agent 抽帧看点'
         );
       }
+    } catch (error) {
+      setPipelineSummary(error instanceof Error ? error.message : '画面分析失败');
     } finally {
       setIsAnalyzingFrame(false);
     }
@@ -389,7 +402,6 @@ export default function App() {
         headerText,
         beats
       );
-      setBeats(tailoredLocal);
 
       const res = await fetch('/api/agent/generate-script', {
         method: 'POST',
@@ -404,7 +416,7 @@ export default function App() {
         }),
       });
       const data = await res.json();
-
+      if (!res.ok || !data.ok) throw new Error(data.error || 'AI 解说稿生成失败');
       if (data.ok && Array.isArray(data.generatedItems) && data.generatedItems.length > 0) {
         setBeats((prev) =>
           prev.map((b, i) => {
@@ -429,6 +441,8 @@ export default function App() {
             : '静默趣味黄字解说词'
         }。`
       );
+    } catch (error) {
+      setPipelineSummary(error instanceof Error ? error.message : 'AI 解说稿生成失败');
     } finally {
       setIsRunningPipeline(false);
     }
@@ -515,6 +529,7 @@ export default function App() {
 
           {/* Right Column (7 cols): Simplified 3-Step Workflow Cards */}
           <div className="lg:col-span-7 flex flex-col gap-5">
+            <EditingAgent videoUrl={currentMaterial.videoUrl} />
             {(activeSection === 'all' ||
               activeSection === 'step1' ||
               activeSection === 'step2') && (

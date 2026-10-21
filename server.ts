@@ -5,25 +5,17 @@ import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
+import { randomUUID } from 'node:crypto';
+import { completeJSON, getAIConfig } from './server/agnes';
+import { burnText, probeVideo, renderVertical, mediaToolDefinitions, type Caption } from './server/mediaTools';
+import { runEditAgent } from './server/editAgent';
 
 dotenv.config();
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-function getGenAIClient() {
-  return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-}
 
 async function detectBinary(binary: string, args: string[] = ['--version']): Promise<{ installed: boolean; version: string }> {
   try {
@@ -134,6 +126,42 @@ async function startServer() {
 
   app.use(express.json({ limit: '25mb' }));
 
+  app.get('/api/agent/status', async (_req, res) => {
+    const { apiKey, ...config } = getAIConfig();
+    const [ffmpeg, ffprobe] = await Promise.all([detectBinary('ffmpeg', ['-version']), detectBinary('ffprobe', ['-version'])]);
+    res.json({ ...config, configured: Boolean(apiKey) && !/^(MY_|YOUR_|填入|replace)/i.test(apiKey),
+      ffmpegInstalled: ffmpeg.installed, ffprobeInstalled: ffprobe.installed,
+      tools: mediaToolDefinitions.map(t => t.function.name), voiceEngine: 'browser-speech' });
+  });
+
+  app.post('/api/media/upload', express.raw({ type: 'application/octet-stream', limit: '512mb' }), async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      res.status(400).json({ error: '请选择视频文件（最大512MB）。' }); return;
+    }
+    const directory = path.join(process.cwd(), 'public', 'assets', 'uploads');
+    fs.mkdirSync(directory, { recursive: true });
+    const name = `${randomUUID()}.mp4`;
+    const file = path.join(directory, name);
+    fs.writeFileSync(file, req.body);
+    try {
+      const videoUrl = `/assets/uploads/${name}`;
+      const metadata = await probeVideo(videoUrl);
+      res.json({ ok: true, videoUrl, ...metadata });
+    } catch {
+      fs.unlinkSync(file);
+      res.status(400).json({ error: '无法读取上传的视频，请检查格式和 FFprobe 安装。' });
+    }
+  });
+
+  app.post('/api/agent/run', async (req, res) => {
+    const { instruction, videoUrl } = req.body || {};
+    if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 6000 || typeof videoUrl !== 'string') {
+      res.status(400).json({ error: '请提供视频素材与1–6000字的剪辑要求。' }); return;
+    }
+    try { res.json(await runEditAgent(instruction, videoUrl)); }
+    catch (error) { res.status(502).json({ ok: false, error: error instanceof Error ? error.message : '剪辑 Agent 执行失败' }); }
+  });
+
   app.get('/api/codex/status', async (_req, res) => {
     const [codexInfo, ffmpegInfo] = await Promise.all([
       detectBinary('codex', ['--version']),
@@ -241,52 +269,26 @@ async function startServer() {
 
   // Render real 9:16 vertical MP4 on server using FFmpeg
   app.post('/api/export/render-mp4', async (req, res) => {
-    const { videoUrl = '/assets/crawled/dung_beetle_doc.mp4' } = req.body || {};
-    const cleanRel = videoUrl.replace(/^\//, '');
-    const inputPath = path.join(process.cwd(), 'public', cleanRel);
-    const outputRel = 'assets/crawled/clippulse_vertical_9x16.mp4';
-    const outputPath = path.join(process.cwd(), 'public', outputRel);
-
-    if (!fs.existsSync(inputPath)) {
-      res.status(404).json({ ok: false, error: '未找到源视频文件' });
-      return;
-    }
-
+    const { videoUrl, beats, templateLayers } = req.body || {};
     try {
-      await execFileAsync(
-        'ffmpeg',
-        [
-          '-y',
-          '-i',
-          inputPath,
-          '-vf',
-          'scale=720:540:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:370:black',
-          '-c:v',
-          'libx264',
-          '-preset',
-          'veryfast',
-          '-crf',
-          '23',
-          '-pix_fmt',
-          'yuv420p',
-          outputPath,
-        ],
-        { timeout: 25000 }
-      );
-
-      res.json({
-        ok: true,
-        downloadUrl: `/${outputRel}?t=${Date.now()}`,
-        resolution: '720x1280 (9:16 竖屏成片)',
-      });
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'FFmpeg 渲染失败',
-      });
+      let result = await renderVertical(videoUrl);
+      const info = await probeVideo(result.videoUrl);
+      const captions: Caption[] = (Array.isArray(beats) ? beats : []).filter(b => b.yellowSubtitle && b.subtitleStartSec < info.duration).map(b => ({
+        start: Math.max(0, b.subtitleStartSec), end: Math.min(info.duration, b.subtitleEndSec), text: b.yellowSubtitle,
+        xPercent: b.customXPercent ?? 50, yPercent: b.customYPercent ?? 68.5,
+      }));
+      for (const layer of Array.isArray(templateLayers) ? templateLayers : []) {
+        if (layer.visible && layer.text && (layer.role === 'header' || layer.role === 'footer')) captions.push({
+          start: 0, end: info.duration, text: layer.text, xPercent: layer.xPercent, yPercent: layer.yPercent,
+          fontSize: Math.max(12, Math.min(150, layer.fontSize * 2)), color: layer.color,
+        });
+      }
+      if (captions.length) result = await burnText(result.videoUrl, captions);
+      res.json({ ok: true, downloadUrl: result.videoUrl, resolution: '720x1280 (9:16)', artifacts: result.artifacts });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : 'FFmpeg 渲染失败' });
     }
   });
-
   // Return README.md content for in-app preview & copy
   app.get('/api/export/readme', (_req, res) => {
     try {
@@ -310,6 +312,7 @@ root = os.getcwd()
 include_files = [
     'README.md',
     'package.json',
+    'package-lock.json',
     'tsconfig.json',
     'vite.config.ts',
     'index.html',
@@ -318,7 +321,7 @@ include_files = [
     'metadata.json',
     'server.ts',
 ]
-include_dirs = ['src', os.path.join('public', 'assets', 'crawled', 'frames')]
+include_dirs = ['src', 'server', os.path.join('public', 'assets', 'crawled', 'frames')]
 
 buf = io.BytesIO()
 count = 0
@@ -348,12 +351,12 @@ with zipfile.ZipFile(mini_buf, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as mz
         full_p = os.path.join(root, f)
         if os.path.isfile(full_p):
             mzf.write(full_p, f)
-    src_dir = os.path.join(root, 'src')
-    for dirpath, _, filenames in os.walk(src_dir):
-        for fn in filenames:
-            fp = os.path.join(dirpath, fn)
-            rel = os.path.relpath(fp, root)
-            mzf.write(fp, rel)
+    for source_dir in ['src', 'server']:
+        for dirpath, _, filenames in os.walk(os.path.join(root, source_dir)):
+            for fn in filenames:
+                fp = os.path.join(dirpath, fn)
+                rel = os.path.relpath(fp, root)
+                mzf.write(fp, rel)
 
 mini_bytes = mini_buf.getvalue()
 
@@ -459,12 +462,12 @@ print(json.dumps({
 import os, shutil
 root = os.getcwd()
 dst = '${tmpGitDir}'
-files = ['README.md', 'package.json', 'tsconfig.json', 'vite.config.ts', 'index.html', '.env.example', '.gitignore', 'metadata.json', 'server.ts']
+files = ['README.md', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'index.html', '.env.example', '.gitignore', 'metadata.json', 'server.ts']
 for f in files:
     s = os.path.join(root, f)
     if os.path.isfile(s):
         shutil.copy2(s, os.path.join(dst, f))
-for d in ['src', os.path.join('public', 'assets')]:
+for d in ['src', 'server', os.path.join('public', 'assets')]:
     s = os.path.join(root, d)
     if os.path.isdir(s):
         shutil.copytree(s, os.path.join(dst, d), dirs_exist_ok=True)
@@ -512,7 +515,7 @@ for d in ['src', os.path.join('public', 'assets')]:
 
     try {
       const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
-      const ai = getGenAIClient();
+
       const isTts = narrationMode === 'tts-voiceover';
 
       const promptText = `你是一个短视频爆款解说与字幕 Agent。
@@ -525,44 +528,19 @@ for d in ['src', os.path.join('public', 'assets')]:
 2. yellowSubtitle: ${isTts ? '用于屏幕展示的1-2行科普解说字幕（可用换行符分隔）' : '简短幽默的黄色解说词（4-10字，如：回家睡觉、居然还放屁）'}。
 3. ttsNarrationText: 适合 TTS 朗读的完整自然解说句（18-45字）。`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: {
-          parts: [
-            { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-            { text: promptText },
-          ],
-        },
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              frameObservation: { type: Type.STRING },
-              yellowSubtitle: { type: Type.STRING },
-              ttsNarrationText: { type: Type.STRING },
-            },
-            required: ['frameObservation', 'yellowSubtitle', 'ttsNarrationText'],
-          },
-        },
-      });
-
-      const parsed = JSON.parse((response.text || '{}').trim());
+      const parsed = await completeJSON(promptText, `data:image/jpeg;base64,${cleanBase64}`) as Record<string, string>;
+      if (!parsed || typeof parsed.frameObservation !== 'string' || typeof parsed.yellowSubtitle !== 'string') {
+        throw new Error('模型返回的画面分析字段无效。');
+      }
       res.json({
         frameObservation: parsed.frameObservation || '捕捉到关键动作画面',
         yellowSubtitle: parsed.yellowSubtitle || '精彩看点出现',
         ttsNarrationText: parsed.ttsNarrationText || parsed.yellowSubtitle || '',
       });
-    } catch {
-      const t = Number(timestampSec || 0);
-      res.json({
-        frameObservation: `第 ${t.toFixed(1)} 秒关键画面细节已提取`,
-        yellowSubtitle: narrationMode === 'tts-voiceover' ? '大自然中奇妙的生存智慧\n正在悄然上演' : '好家伙，太有戏了',
-        ttsNarrationText: '大自然中奇妙的生存智慧，正在这一刻悄然上演。',
-      });
+    } catch (error) {
+      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : '画面分析失败' });
     }
   });
-
   // Dynamically generate distinct scripts based on video content + template header + narration mode
   app.post('/api/agent/generate-script', async (req, res) => {
     const { videoTitle, videoDescription, narrationMode, headerText, footerText, beats } = req.body || {};
@@ -573,7 +551,7 @@ for d in ['src', os.path.join('public', 'assets')]:
     }
 
     try {
-      const ai = getGenAIClient();
+
       const isTts = narrationMode === 'tts-voiceover';
 
       const scenesSummary = beats
@@ -600,86 +578,21 @@ ${scenesSummary}
 - yellowSubtitle: 屏幕字幕（静默模式下为4-10字幽默短句；TTS模式下为1-2行精炼字幕）
 - ttsNarrationText: TTS 语音朗读稿（TTS模式下为连贯解说句；静默模式下可简写）`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: promptText,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                yellowSubtitle: { type: Type.STRING },
-                ttsNarrationText: { type: Type.STRING },
-              },
-              required: ['yellowSubtitle', 'ttsNarrationText'],
-            },
-          },
-        },
-      });
-
-      const parsed = JSON.parse((response.text || '[]').trim());
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        res.json({ ok: true, generatedItems: parsed, engine: 'gemini-3.8-flash' });
-        return;
+      const parsed = await completeJSON(promptText);
+      if (!Array.isArray(parsed) || parsed.length !== beats.length || parsed.some(item =>
+        !item || typeof item.yellowSubtitle !== 'string' || typeof item.ttsNarrationText !== 'string')) {
+        throw new Error('模型返回的镜头数量或字幕字段无效，请重试。');
       }
-      res.json({ ok: false, fallback: true });
-    } catch {
-      res.json({ ok: false, fallback: true });
+      res.json({ ok: true, generatedItems: parsed, engine: getAIConfig().model });
+    } catch (error) {
+      res.status(502).json({ ok: false, error: error instanceof Error ? error.message : '解说稿生成失败' });
     }
   });
 
-  // Synthesize TTS Voiceover using gemini-3.8-flash-lite-tts
-  app.post('/api/agent/tts', async (req, res) => {
-    const { text, voiceName } = req.body || {};
-    if (!text || typeof text !== 'string') {
-      res.status(400).json({ error: '缺少朗读文本 (text)' });
-      return;
-    }
-
-    try {
-      const ai = getGenAIClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text,
-                speechMetadata: {
-                  style: 'Clear, engaging documentary narrator',
-                },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voiceName || 'Kore' },
-            },
-          },
-        },
-      });
-
-      const base64Audio =
-        response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        res.json({
-          ok: true,
-          audioDataUrl: `data:audio/wav;base64,${base64Audio}`,
-        });
-        return;
-      }
-      res.json({ ok: false, fallbackToBrowserSpeech: true });
-    } catch {
-      res.json({ ok: false, fallbackToBrowserSpeech: true });
-    }
+  // Agnes 3.0 Flash is a text model; voice preview uses browser speech synthesis.
+  app.post('/api/agent/tts', (_req, res) => {
+    res.json({ ok: false, fallbackToBrowserSpeech: true, engine: 'browser-speech' });
   });
-
   app.post('/api/codex/execute', async (req, res) => {
     const { command, query, mode } = req.body || {};
     const codexStatus = await detectBinary('codex', ['--version']);
@@ -711,7 +624,7 @@ ${scenesSummary}
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  app.listen(PORT, '127.0.0.1', () => {
     console.log(`ClipPulse Studio running at http://localhost:${PORT}`);
   });
 }

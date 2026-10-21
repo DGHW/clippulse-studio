@@ -67,6 +67,7 @@ export const RightAgentWorkbench: React.FC<RightAgentWorkbenchProps> = ({
   const [newBeatError, setNewBeatError] = useState('');
   const [isRenderingMp4, setIsRenderingMp4] = useState(false);
   const [renderedMp4Url, setRenderedMp4Url] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState('');
 
   const headerLayer = templateLayers.find((l) => l.role === 'header');
   const cliCommand = buildCodexCliCommand(
@@ -127,16 +128,20 @@ export const RightAgentWorkbench: React.FC<RightAgentWorkbenchProps> = ({
 
   const handleRenderMp4 = async () => {
     setIsRenderingMp4(true);
+    setRenderError('');
     try {
       const res = await fetch('/api/export/render-mp4', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoUrl: currentMaterial.videoUrl }),
+        body: JSON.stringify({ videoUrl: currentMaterial.videoUrl, beats, templateLayers }),
       });
       const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || '成片导出失败');
       if (data.ok && data.downloadUrl) {
         setRenderedMp4Url(data.downloadUrl);
       }
+    } catch (error) {
+      setRenderError(error instanceof Error ? error.message : '成片导出失败');
     } finally {
       setIsRenderingMp4(false);
     }
@@ -214,6 +219,7 @@ export const RightAgentWorkbench: React.FC<RightAgentWorkbenchProps> = ({
       </div>
 
       {/* Status Summary Banner */}
+      {renderError && <p role="alert" className="text-sm text-red-700">{renderError}</p>}
       {pipelineSummary && (
         <div className="px-3.5 py-2.5 bg-blue-50/80 border border-blue-200/80 rounded-xl text-xs text-blue-900 leading-relaxed">
           {pipelineSummary}

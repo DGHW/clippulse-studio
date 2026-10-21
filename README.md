@@ -1,5 +1,30 @@
 # ClipPulse Studio · 本机 Codex 视频抽帧故事线与竖屏解说自动化工作台
 
+## 本地 Agnes 剪辑 Agent（2026-10-21）
+
+当前 AI 接口使用 Agnes OpenAI 兼容 Chat Completions，模型 ID 已按[官方文档](https://agnes-ai.com/zh-Hans/docs/agnes-30-flash)核对为 `agnes-3.0-flash`。
+
+将 `.env.example` 复制为 `.env`，填写 `AGNES_API_KEY`：
+
+```env
+AGNES_BASE_URL="https://apihub.agnes-ai.com/v1"
+AGNES_MODEL="agnes-3.0-flash"
+AGNES_API_KEY="在此填写你的 API Key"
+APP_URL="http://localhost:3000"
+```
+
+Key 仅由服务端读取，不使用 `VITE_` 前缀，不提交 `.env`。保存后在界面点击“刷新配置”即可，无须重启。
+
+运行 `npm install`、`npm run dev`，打开 http://localhost:3000。先在“选素材与模式”上传本机视频（最大512MB），再在“Agnes 剪辑 Agent”输入要求，例如“取0到8秒和12到18秒拼接，转9:16，顶部加标题‘旅行日记’，前3秒添加黄色字幕‘出发了’”。
+
+工具由后端真实执行：`probe_video` 读取时长/分辨率/音轨；`extract_frame` 抽帧看图；`cut_video` 精确剪切和顺序拼接；`render_vertical` 输出720×1280竖屏；`add_text` 烧录中文标题和定时字幕并输出ASS字幕文件。每次任务最多10次工具调用，文件保存在 `public/assets/agent/`，原视频保留，结果可预览下载。抽帧视觉理解会发送相应画面给 Agnes；本地 FFmpeg 处理不上传视频到其他平台。
+
+Agnes 3.0 Flash 的输出模态为文本，TTS试听使用浏览器语音，不提供导出配音音轨。官方文档列出图像URL输入，当前工程按OpenAI兼容格式发送本地抽帧Data URL；待填写Key后验证网关是否接受该输入。接口或Key错误会明确显示，不再伪造AI生成成功。
+
+本包未附带母本示例视频，请上传自己的视频。
+
+验证：`npm run lint`、`npm test`、`npm run build`。测试会调用本机 FFmpeg/FFprobe 生成短测试视频，检查真实剪切时长、音轨保留、中文文字烧录以及工具调用结果回传。需要 FFmpeg 的 `ass` 滤镜和中文字体（Windows默认使用Microsoft YaHei）。
+
 > **🚀 一句话用法（直接复制发给本机 Agent / Codex CLI / Claude Code 即可全自动安装并上传 GitHub）：**
 >
 > `请帮我解压 clippulse-studio-local.zip，自动检查安装 ffmpeg 与 npm 依赖、将 .env.example 复制为 .env 并启动 http://localhost:3000 服务；同时初始化 git 仓库并推送到我的 GitHub（仓库名 clippulse-studio）。`
@@ -43,7 +68,7 @@
    - **macOS (Homebrew)**：`brew install ffmpeg`
    - **Windows (Winget / Scoop)**：`winget install Gyan.FFmpeg` 或 `scoop install ffmpeg`
    - **Ubuntu / Debian**：`sudo apt update && sudo apt install -y ffmpeg`
-3. **Gemini API Key**：用于实时画面多模态抽帧识别、动态定制解说词撰写与 TTS 语音合成。
+3. **Agnes API Key**：用于画面理解、解说词撰写与剪辑工具编排。语音试听使用浏览器朗读。
 4. **OpenAI Codex CLI（可选）**：如果您希望在终端直接运行导出的 `codex` 全自动剪辑命令，可通过 `npm install -g @openai/codex` 安装。
 
 ---
@@ -62,7 +87,7 @@ npm install
 
 ### 2. 配置环境变量
 
-复制 `.env.example` 为 `.env`，并填入您的 `GEMINI_API_KEY`：
+复制 `.env.example` 为 `.env`，并填入您的 `AGNES_API_KEY`：
 
 ```bash
 cp .env.example .env
@@ -71,7 +96,9 @@ cp .env.example .env
 打开 `.env` 文件进行编辑：
 
 ```env
-GEMINI_API_KEY="在这里填入您的_GEMINI_API_KEY"
+AGNES_BASE_URL="https://apihub.agnes-ai.com/v1"
+AGNES_MODEL="agnes-3.0-flash"
+AGNES_API_KEY="在这里填入您的_AGNES_API_KEY"
 APP_URL="http://localhost:3000"
 ```
 
@@ -126,7 +153,8 @@ npm run dev
 ```text
 ├── README.md                          # 本地部署与全流程使用说明文档
 ├── package.json                       # 项目依赖与启动脚本配置
-├── server.ts                          # 本地 Express 后端服务（FFmpeg 抽帧合成 / 联网抓取 / Gemini 多模态与 TTS / 工程打包）
+├── server.ts                          # 本地 Express 后端服务（FFmpeg / 联网抓取 / Agnes / 工程打包）
+├── server/                            # Agnes 接口、剪辑 Agent 与 FFmpeg 工具
 ├── index.html                         # Web 工作台入口 HTML
 ├── vite.config.ts                     # Vite 构建配置
 ├── .env.example                       # 环境变量模板
