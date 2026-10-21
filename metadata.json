@@ -1,0 +1,6 @@
+{
+  "name": "ClipPulse · Codex 视频抽帧故事线自动化工作台",
+  "description": "基于本机 Codex CLI 的长视频抽帧看点识别、前3秒黄金抓眼球剪辑、黄色趣味字幕生成与抖音9:16竖屏模板自动化产出平台。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
