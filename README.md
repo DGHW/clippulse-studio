@@ -180,3 +180,12 @@ npm run dev
 ```bash
 npx tsx --test src/utils/pipelineLogic.test.ts
 ```
+
+### ChatGPT 站点与本机工具
+
+云端工作台：https://clippulse-studio-dghw.dgfd81.chatgpt.site （账号私有访问）。
+云端的画面分析和字幕生成使用站点服务端的 Agnes 密钥；视频素材、剪辑 Agent 和 FFmpeg 工具保留在本机。
+配置非空随机 `LOCAL_BRIDGE_TOKEN` 后，本机额外监听 `127.0.0.1:3001`，只接受 Bearer 认证的视频相关接口，不开放 GitHub 推送或终端。
+
+Windows 后台启动：`./scripts/start-cloud-local.ps1`。脚本输出的 `LOCAL_BACKEND_URL` 必须同步到站点同名密钥，并重新部署已有版本。当前使用临时 Cloudflare Tunnel，重建连接可能更换地址。电脑需保持开机联网；日志在忽略提交的 `.runtime` 目录。
+长视频先在本机 `http://localhost:3000` 导入，再从云端顶部“本机素材”选择。云端单次上传限制95MB。

@@ -8,3 +8,4 @@ coverage/
 !.env.example
 public/assets/uploads/
 public/assets/agent/
+.runtime/

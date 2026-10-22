@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { completeJSON, getAIConfig } from './server/agnes';
 import { burnText, probeVideo, renderVertical, mediaToolDefinitions, type Caption } from './server/mediaTools';
 import { runEditAgent } from './server/editAgent';
+import { startLocalBridge } from './server/localBridge';
 
 dotenv.config();
 
@@ -151,6 +152,18 @@ async function startServer() {
       fs.unlinkSync(file);
       res.status(400).json({ error: '无法读取上传的视频，请检查格式和 FFprobe 安装。' });
     }
+  });
+
+  app.get('/api/media/library', async (req, res) => {
+    try {
+      if (typeof req.query.videoUrl === 'string') {
+        const metadata = await probeVideo(req.query.videoUrl);
+        res.json({ ok: true, videoUrl: req.query.videoUrl, ...metadata }); return;
+      }
+      const directory = path.join(process.cwd(), 'public', 'assets', 'uploads');
+      const files = fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => /\.(mp4|mov|webm)$/i.test(name)) : [];
+      res.json({ ok: true, videos: files.slice(-100).map(name => ({ name, videoUrl: `/assets/uploads/${name}`, size: fs.statSync(path.join(directory,name)).size })) });
+    } catch { res.status(400).json({ error: '无法读取本机素材，请检查文件是否存在。' }); }
   });
 
   app.post('/api/agent/run', async (req, res) => {
@@ -627,6 +640,7 @@ ${scenesSummary}
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`ClipPulse Studio running at http://localhost:${PORT}`);
   });
+  startLocalBridge(app);
 }
 
 startServer();
